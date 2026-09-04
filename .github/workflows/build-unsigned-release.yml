@@ -1,0 +1,90 @@
+name: Build validated unsigned Android release
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [ main ]
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v6
+
+      - name: Set up Java 17
+        uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Set up Gradle 9.5.0
+        uses: gradle/actions/setup-gradle@v6
+        with:
+          gradle-version: '9.5.0'
+          cache-provider: basic
+
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Install Android SDK platform and build tools
+        shell: bash
+        run: |
+          yes | sdkmanager --licenses >/dev/null || true
+          sdkmanager "platforms;android-36" "build-tools;36.0.0"
+
+      - name: Build unsigned release APK
+        shell: bash
+        run: gradle --no-daemon --console=plain :app:clean :app:assembleRelease
+
+      - name: Align and validate unsigned APK
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+
+          UNSIGNED="$(find app/build/outputs/apk/release -maxdepth 1 -type f -name '*unsigned*.apk' -print -quit)"
+          if [ -z "$UNSIGNED" ]; then
+            echo "Unsigned release APK not found"
+            find app/build/outputs/apk/release -maxdepth 1 -type f -print || true
+            exit 1
+          fi
+
+          BUILD_TOOLS="$ANDROID_HOME/build-tools/36.0.0"
+          ALIGNED="dist/Shinyu-Aikido-v1.3.12-aligned-unsigned.apk"
+
+          "$BUILD_TOOLS/zipalign" -P 16 -f -v 4 "$UNSIGNED" "$ALIGNED"
+
+          unzip -Z1 "$ALIGNED" | grep -qx 'AndroidManifest.xml'
+          unzip -Z1 "$ALIGNED" | grep -qx 'resources.arsc'
+          "$BUILD_TOOLS/zipalign" -c -P 16 -v 4 "$ALIGNED"
+
+          {
+            echo "SHINYU AIKIDO V1.3.12 UNSIGNED BUILD VERIFICATION"
+            echo
+            echo "=== SHA-256 OF ALIGNED UNSIGNED APK ==="
+            sha256sum "$ALIGNED"
+            echo
+            echo "=== PACKAGE AND VERSION ==="
+            "$BUILD_TOOLS/aapt2" dump badging "$ALIGNED" | grep -E "^package:|^sdkVersion:|^targetSdkVersion:|application-debuggable" || true
+            echo
+            echo "=== REQUESTED PERMISSIONS ==="
+            "$BUILD_TOOLS/aapt2" dump permissions "$ALIGNED"
+            echo
+            echo "PASS: AndroidManifest.xml present"
+            echo "PASS: resources.arsc present"
+            echo "PASS: APK alignment verified"
+          } | tee dist/unsigned-build-verification.txt
+
+      - name: Upload validated unsigned release
+        uses: actions/upload-artifact@v4
+        with:
+          name: Shinyu-Aikido-v1.3.12-unsigned
+          path: dist/
+          if-no-files-found: error
+          retention-days: 30
