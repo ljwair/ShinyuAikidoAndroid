@@ -198,14 +198,14 @@ object LiveContentRepository {
         val headings = extractTags(html, "h[1-6]")
             .filter { it.text.length in 2..120 }
 
-        val markerIndex = headings.indexOfFirst(::isThemeMarker)
+        val markerIndex = headings.indexOfFirst { isThemeMarker(it.text) }
         val marker = headings.getOrNull(markerIndex)
         val afterMarker = if (markerIndex >= 0) headings.drop(markerIndex + 1) else headings
         val titleNode = afterMarker.firstOrNull { isUsefulThemeHeading(it.text) }
             ?: headings.firstOrNull { isUsefulThemeHeading(it.text) }
 
         if (titleNode != null) {
-            var title = normalizeThemeTitle(titleNode.text)
+            val title = normalizeThemeTitle(titleNode.text)
             val paragraphStart = maxOf(titleNode.endIndex, marker?.endIndex ?: 0)
             val candidates = (
                 extractTags(html.substring(paragraphStart), "p").map { it.text } +
@@ -341,7 +341,6 @@ object LiveContentRepository {
             .distinctBy { Triple(it.day, it.city, it.time) }
             .sortedBy { dayOrder(it.day) }
     }
-
 
     private fun parseLiveSessions(json: String): List<SpecialSession> {
         return runCatching {
