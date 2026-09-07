@@ -187,53 +187,83 @@ object LiveContentRepository {
         }
     }
 
-    /** Parse the new dedicated /Aiki-theme page without depending on a particular Hostinger layout. */
+    /**
+     * Parse /Aiki-theme without depending on Hostinger's exact element types.
+     *
+     * Older versions required the theme title to be inside an h1-h6 tag. Hostinger embed/code
+     * blocks can render visible text in div/span elements instead, which caused the app to fall
+     * back to the bundled theme. We now try headings first, then the complete visible-text stream.
+     */
     private fun parseTheme(html: String): AikiTheme? {
         val headings = extractTags(html, "h[1-6]")
             .filter { it.text.length in 2..120 }
-        if (headings.isEmpty()) return null
 
-        val markerIndex = headings.indexOfFirst {
-            it.text.contains("aiki theme", ignoreCase = true) ||
-                it.text.contains("theme of the week", ignoreCase = true) ||
-                it.text.contains("this week's", ignoreCase = true)
-        }
-
+        val markerIndex = headings.indexOfFirst(::isThemeMarker)
         val marker = headings.getOrNull(markerIndex)
         val afterMarker = if (markerIndex >= 0) headings.drop(markerIndex + 1) else headings
-
         val titleNode = afterMarker.firstOrNull { isUsefulThemeHeading(it.text) }
             ?: headings.firstOrNull { isUsefulThemeHeading(it.text) }
-            ?: return null
 
-        var title = titleNode.text.trim()
-        // If the author writes "This week's Aiki Theme: Ura", keep only the actual theme name.
+        if (titleNode != null) {
+            var title = normalizeThemeTitle(titleNode.text)
+            val paragraphStart = maxOf(titleNode.endIndex, marker?.endIndex ?: 0)
+            val candidates = (
+                extractTags(html.substring(paragraphStart), "p").map { it.text } +
+                    visibleLines(html.substring(paragraphStart))
+                )
+                .filter(::isUsefulBodyText)
+                .filterNot { it.equals(title, ignoreCase = true) }
+                .distinct()
+
+            return buildTheme(title, candidates)
+        }
+
+        // Hostinger embed/code blocks may not expose semantic heading tags at all.
+        val lines = visibleLines(html)
+            .filter { it.length <= 500 }
+            .distinct()
+        if (lines.isEmpty()) return null
+
+        val visibleMarkerIndex = lines.indexOfFirst(::isThemeMarker)
+        val searchStart = if (visibleMarkerIndex >= 0) visibleMarkerIndex + 1 else 0
+
+        val titleIndex = (searchStart until lines.size).firstOrNull { index ->
+            isUsefulThemeHeading(lines[index]) && !isUsefulBodyText(lines[index])
+        } ?: (searchStart until lines.size).firstOrNull { index ->
+            isUsefulThemeHeading(lines[index])
+        } ?: return null
+
+        val title = normalizeThemeTitle(lines[titleIndex])
+        val candidates = lines.drop(titleIndex + 1)
+            .filter(::isUsefulBodyText)
+            .filterNot { it.equals(title, ignoreCase = true) }
+            .take(12)
+
+        return buildTheme(title, candidates)
+    }
+
+    private fun isThemeMarker(text: String): Boolean {
+        val s = text.lowercase(Locale.ROOT)
+        return s.contains("aiki theme") ||
+            s.contains("theme of the week") ||
+            s.contains("this week's") ||
+            s.contains("this week’s")
+    }
+
+    private fun normalizeThemeTitle(raw: String): String {
+        var title = raw.trim()
         if (title.contains(':') && title.contains("theme", ignoreCase = true)) {
             title = title.substringAfter(':').trim().ifBlank { title }
         }
+        return title.take(120)
+    }
 
-        val paragraphStart = maxOf(titleNode.endIndex, marker?.endIndex ?: 0)
-        val paragraphs = extractTags(html.substring(paragraphStart), "p")
-            .map { it.text }
-            .filter(::isUsefulBodyText)
-            .distinct()
-            .take(10)
-
-        val visibleAfter = visibleLines(html.substring(paragraphStart))
-            .filter(::isUsefulBodyText)
-            .filterNot { it.equals(title, ignoreCase = true) }
-            .distinct()
-
-        val candidates = (paragraphs + visibleAfter).distinct()
-        val focus = candidates.firstOrNull() ?: return AikiTheme(
-            title = title,
-            focus = "Open the weekly theme for this week's focus.",
-            practicePrompt = "Explore the theme in your training this week."
-        )
-
+    private fun buildTheme(title: String, candidates: List<String>): AikiTheme {
+        val focus = candidates.firstOrNull()
+            ?: "Open the weekly theme for this week's focus."
         val prompt = candidates.drop(1).firstOrNull {
             val s = it.lowercase(Locale.ROOT)
-            listOf("practice", "notice", "try", "exercise", "observe", "this week", "explore").any(s::contains)
+            listOf("practice", "notice", "try", "exercise", "observe", "this week", "explore", "reflect").any(s::contains)
         } ?: candidates.getOrNull(1) ?: focus
 
         return AikiTheme(
