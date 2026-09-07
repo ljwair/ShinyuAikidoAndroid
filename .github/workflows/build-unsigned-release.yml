@@ -1,4 +1,4 @@
-name: Build validated unsigned Android release
+name: Build and publish signed Android release
 
 on:
   workflow_dispatch:
@@ -6,7 +6,7 @@ on:
     branches: [ main ]
 
 permissions:
-  contents: read
+  contents: write
 
 jobs:
   build:
@@ -42,8 +42,22 @@ jobs:
         shell: bash
         run: gradle --no-daemon --console=plain :app:clean :app:assembleRelease
 
-      - name: Align and validate unsigned APK
+      - name: Decode release keystore
         shell: bash
+        env:
+          KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+        run: |
+          set -euo pipefail
+          test -n "$KEYSTORE_BASE64"
+          printf '%s' "$KEYSTORE_BASE64" | base64 --decode > "$RUNNER_TEMP/shinyu-release.jks"
+          test -s "$RUNNER_TEMP/shinyu-release.jks"
+
+      - name: Align, sign and verify APK
+        shell: bash
+        env:
+          KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+          KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
         run: |
           set -euo pipefail
           mkdir -p dist
@@ -56,35 +70,62 @@ jobs:
           fi
 
           BUILD_TOOLS="$ANDROID_HOME/build-tools/36.0.0"
-          ALIGNED="dist/Shinyu-Aikido-v1.3.12-aligned-unsigned.apk"
+          ALIGNED="$RUNNER_TEMP/Shinyu-Aikido-aligned-unsigned.apk"
+          SIGNED="dist/Shinyu-Aikido.apk"
 
           "$BUILD_TOOLS/zipalign" -P 16 -f -v 4 "$UNSIGNED" "$ALIGNED"
 
-          unzip -Z1 "$ALIGNED" | grep -qx 'AndroidManifest.xml'
-          unzip -Z1 "$ALIGNED" | grep -qx 'resources.arsc'
-          "$BUILD_TOOLS/zipalign" -c -P 16 -v 4 "$ALIGNED"
+          "$BUILD_TOOLS/apksigner" sign \
+            --ks "$RUNNER_TEMP/shinyu-release.jks" \
+            --ks-key-alias "$KEY_ALIAS" \
+            --ks-pass "pass:$KEYSTORE_PASSWORD" \
+            --key-pass "pass:$KEY_PASSWORD" \
+            --out "$SIGNED" \
+            "$ALIGNED"
+
+          "$BUILD_TOOLS/apksigner" verify --verbose --print-certs "$SIGNED" | tee dist/signing-verification.txt
+          "$BUILD_TOOLS/zipalign" -c -P 16 -v 4 "$SIGNED"
 
           {
-            echo "SHINYU AIKIDO V1.3.12 UNSIGNED BUILD VERIFICATION"
+            echo "SHINYU AIKIDO V1.3.13 SIGNED BUILD VERIFICATION"
             echo
-            echo "=== SHA-256 OF ALIGNED UNSIGNED APK ==="
-            sha256sum "$ALIGNED"
+            echo "=== SHA-256 OF SIGNED APK ==="
+            sha256sum "$SIGNED"
             echo
             echo "=== PACKAGE AND VERSION ==="
-            "$BUILD_TOOLS/aapt2" dump badging "$ALIGNED" | grep -E "^package:|^sdkVersion:|^targetSdkVersion:|application-debuggable" || true
+            "$BUILD_TOOLS/aapt2" dump badging "$SIGNED" | grep -E "^package:|^sdkVersion:|^targetSdkVersion:|application-debuggable" || true
             echo
             echo "=== REQUESTED PERMISSIONS ==="
-            "$BUILD_TOOLS/aapt2" dump permissions "$ALIGNED"
+            "$BUILD_TOOLS/aapt2" dump permissions "$SIGNED"
             echo
-            echo "PASS: AndroidManifest.xml present"
-            echo "PASS: resources.arsc present"
+            echo "PASS: APK signed"
+            echo "PASS: APK signature verified"
             echo "PASS: APK alignment verified"
-          } | tee dist/unsigned-build-verification.txt
+          } | tee dist/release-build-verification.txt
 
-      - name: Upload validated unsigned release
+      - name: Upload signed release artifact
         uses: actions/upload-artifact@v4
         with:
-          name: Shinyu-Aikido-v1.3.12-unsigned
+          name: Shinyu-Aikido-v1.3.13-signed
           path: dist/
           if-no-files-found: error
           retention-days: 30
+
+      - name: Publish GitHub release v1.3.13
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          TAG="v1.3.13"
+          APK="dist/Shinyu-Aikido.apk"
+          NOTES="Signed Android build with improved live Aiki Theme parsing from shinyuembody.org. Because the signing key was reset, users with an older APK signed by the previous key may need to uninstall the old app once before installing this version."
+
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            gh release upload "$TAG" "$APK" --clobber
+          else
+            gh release create "$TAG" "$APK" \
+              --target "$GITHUB_SHA" \
+              --title "Shinyu Aikido v1.3.13" \
+              --notes "$NOTES"
+          fi
