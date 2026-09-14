@@ -49,7 +49,8 @@ object LiveContentRepository {
     suspend fun load(context: Context): HomeContent = coroutineScope {
         val appContext = context.applicationContext
         val themeDeferred = async(Dispatchers.IO) {
-            loadRawPage(appContext, AIKI_THEME_JSON_URL, "aiki_theme_live.json", "application/json,text/plain,*/*")
+            val cacheBustedThemeUrl = "$AIKI_THEME_JSON_URL?ts=${System.currentTimeMillis()}"
+            loadRawPage(appContext, cacheBustedThemeUrl, "aiki_theme_live.json", "application/json,text/plain,*/*")
         }
         val scheduleDeferred = async(Dispatchers.IO) {
             loadPage(appContext, SCHEDULE_URL, "aikido_schedule_live.html")
@@ -130,11 +131,16 @@ object LiveContentRepository {
         val connection = URL(url).openConnection() as HttpURLConnection
         return try {
             connection.instanceFollowRedirects = true
+            connection.useCaches = false
+            connection.defaultUseCaches = false
             connection.connectTimeout = 6500
             connection.readTimeout = 6500
             connection.requestMethod = "GET"
             connection.setRequestProperty("User-Agent", "Mozilla/5.0 (Linux; Android) ShinyuAikido/1.3")
             connection.setRequestProperty("Accept", accept)
+            connection.setRequestProperty("Cache-Control", "no-cache, no-store, max-age=0")
+            connection.setRequestProperty("Pragma", "no-cache")
+            connection.setRequestProperty("Expires", "0")
             connection.connect()
             if (connection.responseCode !in 200..299) error("HTTP ${connection.responseCode}")
             connection.inputStream.bufferedReader().use { it.readText() }
