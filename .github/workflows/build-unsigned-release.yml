@@ -38,9 +38,9 @@ jobs:
           yes | sdkmanager --licenses >/dev/null || true
           sdkmanager "platforms;android-36" "build-tools;36.0.0"
 
-      - name: Build unsigned release APK
+      - name: Build release APK and App Bundle
         shell: bash
-        run: gradle --no-daemon --console=plain :app:clean :app:assembleRelease
+        run: gradle --no-daemon --console=plain :app:clean :app:assembleRelease :app:bundleRelease
 
       - name: Decode release keystore
         shell: bash
@@ -52,7 +52,7 @@ jobs:
           printf '%s' "$KEYSTORE_BASE64" | tr -d '\r\n ' | base64 --decode > "$RUNNER_TEMP/shinyu-release.jks"
           test -s "$RUNNER_TEMP/shinyu-release.jks"
 
-      - name: Align, sign and verify APK
+      - name: Sign APK and App Bundle
         shell: bash
         env:
           KEYSTORE_PASSWORD_RAW: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
@@ -64,32 +64,48 @@ jobs:
           KEYSTORE_PASSWORD="$(printf '%s' "$KEYSTORE_PASSWORD_RAW" | tr -d '\r\n')"
           KEY_ALIAS="$(printf '%s' "$KEY_ALIAS_RAW" | tr -d '\r\n')"
           KEY_PASSWORD="$(printf '%s' "$KEY_PASSWORD_RAW" | tr -d '\r\n')"
-          UNSIGNED="$(find app/build/outputs/apk/release -maxdepth 1 -type f -name '*unsigned*.apk' -print -quit)"
-          test -n "$UNSIGNED"
+
           BUILD_TOOLS="$ANDROID_HOME/build-tools/36.0.0"
-          ALIGNED="$RUNNER_TEMP/Shinyu-Aikido-aligned-unsigned.apk"
-          SIGNED="dist/Shinyu-Aikido.apk"
-          "$BUILD_TOOLS/zipalign" -P 16 -f -v 4 "$UNSIGNED" "$ALIGNED"
+
+          UNSIGNED_APK="$(find app/build/outputs/apk/release -maxdepth 1 -type f -name '*unsigned*.apk' -print -quit)"
+          test -n "$UNSIGNED_APK"
+          ALIGNED_APK="$RUNNER_TEMP/Shinyu-Aikido-aligned-unsigned.apk"
+          SIGNED_APK="dist/Shinyu-Aikido.apk"
+          "$BUILD_TOOLS/zipalign" -P 16 -f -v 4 "$UNSIGNED_APK" "$ALIGNED_APK"
           "$BUILD_TOOLS/apksigner" sign \
             --ks "$RUNNER_TEMP/shinyu-release.jks" \
             --ks-key-alias "$KEY_ALIAS" \
             --ks-pass "pass:$KEYSTORE_PASSWORD" \
             --key-pass "pass:$KEY_PASSWORD" \
-            --out "$SIGNED" "$ALIGNED"
-          "$BUILD_TOOLS/apksigner" verify --verbose --print-certs "$SIGNED" | tee dist/signing-verification.txt
-          "$BUILD_TOOLS/zipalign" -c -P 16 -v 4 "$SIGNED"
+            --out "$SIGNED_APK" "$ALIGNED_APK"
+          "$BUILD_TOOLS/apksigner" verify --verbose --print-certs "$SIGNED_APK" | tee dist/apk-signing-verification.txt
+          "$BUILD_TOOLS/zipalign" -c -P 16 -v 4 "$SIGNED_APK"
+
+          UNSIGNED_AAB="$(find app/build/outputs/bundle/release -maxdepth 1 -type f -name '*.aab' -print -quit)"
+          test -n "$UNSIGNED_AAB"
+          SIGNED_AAB="dist/Shinyu-Aikido.aab"
+          cp "$UNSIGNED_AAB" "$SIGNED_AAB"
+          jarsigner \
+            -keystore "$RUNNER_TEMP/shinyu-release.jks" \
+            -storepass "$KEYSTORE_PASSWORD" \
+            -keypass "$KEY_PASSWORD" \
+            -sigalg SHA256withRSA \
+            -digestalg SHA-256 \
+            "$SIGNED_AAB" "$KEY_ALIAS"
+          jarsigner -verify -verbose -certs "$SIGNED_AAB" | tee dist/aab-signing-verification.txt
+
           {
-            echo "SHINYU AIKIDO V1.3.14 SIGNED BUILD VERIFICATION"
-            sha256sum "$SIGNED"
-            "$BUILD_TOOLS/aapt2" dump badging "$SIGNED" | grep -E "^package:|^sdkVersion:|^targetSdkVersion:|application-debuggable" || true
-            "$BUILD_TOOLS/aapt2" dump permissions "$SIGNED"
-            echo "PASS: APK signed and verified"
+            echo "SHINYU AIKIDO GOOGLE PLAY BUILD VERIFICATION"
+            sha256sum "$SIGNED_APK" "$SIGNED_AAB"
+            "$BUILD_TOOLS/aapt2" dump badging "$SIGNED_APK" | grep -E "^package:|^sdkVersion:|^targetSdkVersion:|application-debuggable" || true
+            "$BUILD_TOOLS/aapt2" dump permissions "$SIGNED_APK"
+            echo "PASS: APK and AAB signed and verified"
           } | tee dist/release-build-verification.txt
 
-      - name: Upload signed release artifact
+      - name: Upload signed release artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: Shinyu-Aikido-v1.3.14-signed
+          name: Shinyu-Aikido-Google-Play-build
           path: dist/
           if-no-files-found: error
           retention-days: 30
@@ -102,9 +118,10 @@ jobs:
           set -euo pipefail
           TAG="v1.3.14"
           APK="dist/Shinyu-Aikido.apk"
-          NOTES="Signed Android build. Weekly Aiki Theme now comes from an explicit live JSON feed instead of scraping the Hostinger page, making theme updates reliable."
+          AAB="dist/Shinyu-Aikido.aab"
+          NOTES="Signed Android build. Includes an Android App Bundle for Google Play closed testing."
           if gh release view "$TAG" >/dev/null 2>&1; then
-            gh release upload "$TAG" "$APK" --clobber
+            gh release upload "$TAG" "$APK" "$AAB" --clobber
           else
-            gh release create "$TAG" "$APK" --target "$GITHUB_SHA" --title "Shinyu Aikido v1.3.14" --notes "$NOTES"
+            gh release create "$TAG" "$APK" "$AAB" --target "$GITHUB_SHA" --title "Shinyu Aikido v1.3.14" --notes "$NOTES"
           fi
