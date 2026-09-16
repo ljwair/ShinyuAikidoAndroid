@@ -10,9 +10,9 @@ android {
     defaultConfig {
         applicationId = "org.shinyuembody.aikido"
         minSdk = 26
-        targetSdk = 35
-        versionCode = 144
-        versionName = "1.3.14"
+        targetSdk = 36
+        versionCode = 145
+        versionName = "1.3.15"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
